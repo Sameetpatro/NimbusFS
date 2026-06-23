@@ -1,0 +1,23 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "NimbusFS — Phase 1 scaffold",
+      "type": "text",
+      "options": {
+        "content": "Metrics dashboards will populate in Phase 3 when we export prometheus counters from master and storage nodes.",
+        "mode": "markdown"
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["nimbusfs"],
+  "title": "NimbusFS Overview",
+  "uid": "nimbusfs-overview",
+  "version": 1
+}

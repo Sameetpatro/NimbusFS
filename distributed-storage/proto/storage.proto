@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package storage.v1;
+
+option go_package = "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storage/v1;storagev1";
+
+// StorageService is the grpc interface storage nodes expose to each other and to master.
+// using streaming rpcs for chunk transfer avoids loading full chunks into memory
+service StorageService {
+  rpc StoreChunk(stream StoreChunkRequest) returns (StoreChunkResponse);
+  rpc RetrieveChunk(RetrieveChunkRequest) returns (stream RetrieveChunkResponse);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ReplicateChunk(ReplicateChunkRequest) returns (ReplicateChunkResponse);
+}
+
+// StoreChunkRequest streams chunk bytes; first message carries metadata, rest carry data frames.
+message StoreChunkRequest {
+  oneof payload {
+    StoreChunkMetadata metadata = 1;
+    bytes data = 2;
+  }
+}
+
+// StoreChunkMetadata identifies the chunk before bytes arrive on the stream.
+message StoreChunkMetadata {
+  string chunk_id = 1;
+  string file_id = 2;
+  int32 index = 3;
+  int64 size = 4;
+  string checksum = 5;
+}
+
+// StoreChunkResponse confirms persistence on the storage node.
+message StoreChunkResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// RetrieveChunkRequest asks a node to stream back a chunk by id.
+message RetrieveChunkRequest {
+  string chunk_id = 1;
+  string file_id = 2;
+}
+
+// RetrieveChunkResponse streams metadata first then data frames.
+message RetrieveChunkResponse {
+  oneof payload {
+    RetrieveChunkMetadata metadata = 1;
+    bytes data = 2;
+  }
+}
+
+message RetrieveChunkMetadata {
+  string chunk_id = 1;
+  string file_id = 2;
+  int32 index = 3;
+  int64 size = 4;
+  string checksum = 5;
+}
+
+// DeleteChunkRequest removes a chunk from local disk when master drops the last reference.
+message DeleteChunkRequest {
+  string chunk_id = 1;
+  string file_id = 2;
+}
+
+message DeleteChunkResponse {
+  bool success = 1;
+}
+
+// HeartbeatRequest lets storage nodes report capacity stats to peers or master proxies.
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 used_space = 2;
+  int64 total_space = 3;
+  int32 chunk_count = 4;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+// ReplicateChunkRequest triggers node-to-node copy during re-replication.
+message ReplicateChunkRequest {
+  string source_node_id = 1;
+  string chunk_id = 2;
+  string file_id = 3;
+}
+
+message ReplicateChunkResponse {
+  bool success = 1;
+  string message = 2;
+}

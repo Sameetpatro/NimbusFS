@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: master
+    static_configs:
+      - targets: ["master:9091"]
+        labels:
+          service: master
+
+  - job_name: storage
+    static_configs:
+      - targets:
+          - "storage-1:9101"
+          - "storage-2:9102"
+          - "storage-3:9103"
+          - "storage-4:9104"
+          - "storage-5:9105"
+        labels:
+          service: storage
