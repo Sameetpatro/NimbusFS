@@ -29,6 +29,8 @@ services:
       NODE_ID: "storage-node-1"
       STORAGE_DATA_DIR: "/data/storage"
       METRICS_PORT: "9101"
+      MASTER_GRPC_ADDR: "master:9090"
+      STORAGE_GRPC_ADDR: "storage-1:9091"
     volumes:
       - storage-1-data:/data/storage
     networks:
@@ -49,6 +51,8 @@ services:
       NODE_ID: "storage-node-2"
       STORAGE_DATA_DIR: "/data/storage"
       METRICS_PORT: "9102"
+      MASTER_GRPC_ADDR: "master:9090"
+      STORAGE_GRPC_ADDR: "storage-2:9091"
     volumes:
       - storage-2-data:/data/storage
     networks:
@@ -69,6 +73,8 @@ services:
       NODE_ID: "storage-node-3"
       STORAGE_DATA_DIR: "/data/storage"
       METRICS_PORT: "9103"
+      MASTER_GRPC_ADDR: "master:9090"
+      STORAGE_GRPC_ADDR: "storage-3:9091"
     volumes:
       - storage-3-data:/data/storage
     networks:
@@ -89,6 +95,8 @@ services:
       NODE_ID: "storage-node-4"
       STORAGE_DATA_DIR: "/data/storage"
       METRICS_PORT: "9104"
+      MASTER_GRPC_ADDR: "master:9090"
+      STORAGE_GRPC_ADDR: "storage-4:9091"
     volumes:
       - storage-4-data:/data/storage
     networks:
@@ -109,6 +117,8 @@ services:
       NODE_ID: "storage-node-5"
       STORAGE_DATA_DIR: "/data/storage"
       METRICS_PORT: "9105"
+      MASTER_GRPC_ADDR: "master:9090"
+      STORAGE_GRPC_ADDR: "storage-5:9091"
     volumes:
       - storage-5-data:/data/storage
     networks:

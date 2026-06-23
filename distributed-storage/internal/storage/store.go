@@ -1,90 +1,118 @@
 package storage
 
 import (
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"syscall"
 
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/chunking"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/domain"
 )
 
-// LocalStore persists chunk bytes as files on disk under dataDir.
-type LocalStore struct {
-	// root is the base directory; each chunk becomes root/<fileID>/<chunkID>
-	root string
+// DiskStore manages chunk files on local disk.
+// one file per chunk, named by chunkID — avoids complex block management
+type DiskStore struct {
+	baseDir string
+	mu      sync.RWMutex // protects concurrent reads and writes to same chunk
 }
 
-// NewLocalStore ensures the data directory exists before any writes.
-func NewLocalStore(dataDir string) (*LocalStore, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create storage data dir: %w", err)
+// NewDiskStore ensures the storage directory exists before serving chunks.
+func NewDiskStore(baseDir string) (*DiskStore, error) {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return nil, fmt.Errorf("storage.NewDiskStore: mkdir %s: %w", baseDir, err)
 	}
-	return &LocalStore{root: dataDir}, nil
+	return &DiskStore{baseDir: baseDir}, nil
 }
 
-// chunkPath builds a stable path so chunks from different files never collide on disk.
-func (s *LocalStore) chunkPath(fileID, chunkID string) string {
-	return filepath.Join(s.root, fileID, chunkID)
+func (s *DiskStore) chunkPath(chunkID string) string {
+	return filepath.Join(s.baseDir, chunkID)
 }
 
-// Put writes chunk bytes to disk and creates parent dirs as needed.
-func (s *LocalStore) Put(ctx context.Context, chunk domain.Chunk) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+// StoreChunk writes data to disk atomically.
+// write to a .tmp file first, then rename — rename is atomic on linux,
+// so a crash mid-write never leaves a corrupt chunk file
+func (s *DiskStore) StoreChunk(chunk *domain.Chunk) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	path := s.chunkPath(chunk.FileID, chunk.ChunkID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create chunk dir: %w", err)
-	}
+	finalPath := s.chunkPath(chunk.ChunkID)
+	tmpPath := finalPath + ".tmp"
 
-	// write atomically via temp file in phase 2; direct write is fine for scaffold
-	if err := os.WriteFile(path, chunk.Data, 0o600); err != nil {
-		return fmt.Errorf("write chunk %s: %w", chunk.ChunkID, err)
+	if err := os.WriteFile(tmpPath, chunk.Data, 0o600); err != nil {
+		return fmt.Errorf("storage.StoreChunk: write tmp %s: %w", chunk.ChunkID, err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("storage.StoreChunk: rename %s: %w", chunk.ChunkID, err)
 	}
 	return nil
 }
 
-// Get reads a chunk from disk into memory for grpc streaming in later phases.
-func (s *LocalStore) Get(ctx context.Context, fileID, chunkID string) (*domain.Chunk, error) {
-	if err := ctx.Err(); err != nil {
+// RetrieveChunk reads chunk from disk and verifies checksum.
+// checksum mismatch means bit rot or corruption — return error so caller tries another replica
+func (s *DiskStore) RetrieveChunk(chunkID string) (*domain.Chunk, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, err := os.ReadFile(s.chunkPath(chunkID))
+	if err != nil {
+		return nil, fmt.Errorf("storage.RetrieveChunk: read %s: %w", chunkID, err)
+	}
+
+	sum := sha256.Sum256(data)
+	checksum := hex.EncodeToString(sum[:])
+
+	chunk := &domain.Chunk{
+		ChunkID:  chunkID,
+		Data:     data,
+		Checksum: checksum,
+	}
+	if checksum != chunkID {
+		// chunk id is content hash; mismatch means on-disk bytes don't match expected identity
+		return nil, fmt.Errorf("storage.RetrieveChunk: id/checksum mismatch for %s", chunkID)
+	}
+	return chunk, nil
+}
+
+// RetrieveChunkVerified loads a chunk and validates against an expected checksum field.
+func (s *DiskStore) RetrieveChunkVerified(chunkID, expectedChecksum string) (*domain.Chunk, error) {
+	chunk, err := s.RetrieveChunk(chunkID)
+	if err != nil {
 		return nil, err
 	}
-
-	path := s.chunkPath(fileID, chunkID)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read chunk %s: %w", chunkID, err)
+	if expectedChecksum != "" && chunk.Checksum != expectedChecksum {
+		return nil, fmt.Errorf("storage.RetrieveChunkVerified: checksum mismatch for %s", chunkID)
 	}
-
-	return &domain.Chunk{
-		ChunkID: chunkID,
-		FileID:  fileID,
-		Data:    data,
-	}, nil
+	if err := chunking.VerifyChecksum(chunk); err != nil {
+		return nil, fmt.Errorf("storage.RetrieveChunkVerified: %w", err)
+	}
+	return chunk, nil
 }
 
-// Delete removes a chunk file from disk when master confirms it's unreferenced.
-func (s *LocalStore) Delete(ctx context.Context, fileID, chunkID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	path := s.chunkPath(fileID, chunkID)
+// DeleteChunk removes a chunk file from disk.
+func (s *DiskStore) DeleteChunk(chunkID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.chunkPath(chunkID)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete chunk %s: %w", chunkID, err)
+		return fmt.Errorf("storage.DeleteChunk: %s: %w", chunkID, err)
 	}
 	return nil
 }
 
-// UsedBytes walks the tree to report disk usage for heartbeat payloads.
-func (s *LocalStore) UsedBytes() (int64, error) {
+// UsedBytes walks the chunk directory to report bytes used in heartbeats.
+func (s *DiskStore) UsedBytes() (int64, error) {
 	var total int64
-	err := filepath.Walk(s.root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(s.baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		if !info.IsDir() && filepath.Ext(path) != ".tmp" {
 			total += info.Size()
 		}
 		return nil
@@ -92,14 +120,23 @@ func (s *LocalStore) UsedBytes() (int64, error) {
 	return total, err
 }
 
-// ChunkCount returns the number of chunk files on disk for load reporting.
-func (s *LocalStore) ChunkCount() (int, error) {
+// TotalBytes reports filesystem capacity via statfs for placement decisions on master.
+func (s *DiskStore) TotalBytes() (int64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(s.baseDir, &stat); err != nil {
+		return 0, fmt.Errorf("storage.TotalBytes: statfs: %w", err)
+	}
+	return int64(stat.Blocks) * int64(stat.Bsize), nil
+}
+
+// ChunkCount returns the number of chunk files stored locally.
+func (s *DiskStore) ChunkCount() (int, error) {
 	count := 0
-	err := filepath.Walk(s.root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(s.baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		if !info.IsDir() && filepath.Ext(path) != ".tmp" {
 			count++
 		}
 		return nil

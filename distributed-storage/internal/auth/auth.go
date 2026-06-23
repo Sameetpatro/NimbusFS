@@ -11,8 +11,8 @@ import (
 
 // Validator will verify JWT and API keys in phase 3 middleware.
 type Validator struct {
-	secret     []byte
-	apiKeyHdr  string
+	secret    []byte
+	apiKeyHdr string
 }
 
 // NewValidator builds an auth helper from config; handlers wire this in phase 3.

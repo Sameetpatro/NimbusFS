@@ -15,6 +15,8 @@ type MasterConfig struct {
 	Port     int    `yaml:"port"`
 	GRPCPort int    `yaml:"grpc_port"`
 	DataDir  string `yaml:"data_dir"`
+	// GRPCAddr is optional full host:port override for clients (env MASTER_GRPC_ADDR)
+	GRPCAddr string `yaml:"-"`
 }
 
 // StorageConfig holds cluster-wide storage policy knobs shared by master and nodes.
@@ -29,6 +31,8 @@ type NodeConfig struct {
 	HeartbeatInterval int    `yaml:"heartbeat_interval"`
 	DeadThreshold     int    `yaml:"dead_threshold"`
 	NodeID            string `yaml:"node_id"`
+	// AdvertiseAddr is the host:port other nodes use to reach this storage node
+	AdvertiseAddr string `yaml:"-"`
 }
 
 // AuthConfig holds REST authentication settings for later middleware wiring.
@@ -141,6 +145,12 @@ func applyEnvOverrides(cfg *Config) {
 		// normalize to lowercase so "INFO" from k8s config maps still works with slog parsers
 		cfg.Observability.LogLevel = strings.ToLower(v)
 	}
+	if v := os.Getenv("MASTER_GRPC_ADDR"); v != "" {
+		cfg.Master.GRPCAddr = v
+	}
+	if v := os.Getenv("STORAGE_GRPC_ADDR"); v != "" {
+		cfg.Node.AdvertiseAddr = v
+	}
 }
 
 // ChunkSizeBytes converts the mb config knob to bytes for chunker and domain logic.
@@ -154,7 +164,23 @@ func (c *Config) MasterRESTAddr() string {
 	return fmt.Sprintf("%s:%d", c.Master.Host, c.Master.Port)
 }
 
-// MasterGRPCAddr returns host:port for the master gRPC server listener.
-func (c *Config) MasterGRPCAddr() string {
+// MasterGRPCListenAddr returns the address the master grpc server binds to.
+func (c *Config) MasterGRPCListenAddr() string {
 	return fmt.Sprintf("%s:%d", c.Master.Host, c.Master.GRPCPort)
+}
+
+// MasterGRPCAddr returns host:port for storage nodes to dial master grpc.
+func (c *Config) MasterGRPCAddr() string {
+	if c.Master.GRPCAddr != "" {
+		return c.Master.GRPCAddr
+	}
+	return fmt.Sprintf("%s:%d", c.Master.Host, c.Master.GRPCPort)
+}
+
+// StorageAdvertiseAddr returns the address this node registers with master.
+func (c *Config) StorageAdvertiseAddr(grpcPort int) string {
+	if c.Node.AdvertiseAddr != "" {
+		return c.Node.AdvertiseAddr
+	}
+	return fmt.Sprintf("0.0.0.0:%d", grpcPort)
 }

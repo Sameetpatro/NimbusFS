@@ -3,6 +3,7 @@ package grpcserver
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
 	"google.golang.org/grpc"
@@ -10,11 +11,10 @@ import (
 
 // Server wraps grpc.Server with consistent logging and graceful shutdown hooks.
 type Server struct {
-	// addr is host:port we bind; kept for error messages when listen fails
-	addr string
-	// grpcServer is the underlying server; pointer so Stop drains in-flight rpcs
+	addr       string
 	grpcServer *grpc.Server
 	log        *logger.Logger
+	stopOnce   sync.Once // sync.Once for grpc server graceful shutdown so Stop is idempotent
 }
 
 // NewServer builds a grpc server with optional extra options for tls in phase 3.
@@ -26,7 +26,7 @@ func NewServer(addr string, log *logger.Logger, opts ...grpc.ServerOption) *Serv
 	}
 }
 
-// GRPC returns the raw server so callers can RegisterStorageServiceServer etc.
+// GRPC returns the raw server so callers can register service implementations.
 func (s *Server) GRPC() *grpc.Server {
 	return s.grpcServer
 }
@@ -35,7 +35,7 @@ func (s *Server) GRPC() *grpc.Server {
 func (s *Server) ListenAndServe() error {
 	lis, err := net.Listen("tcp", s.addr)
 	if err != nil {
-		return fmt.Errorf("grpc listen %s: %w", s.addr, err)
+		return fmt.Errorf("grpcserver.ListenAndServe: listen %s: %w", s.addr, err)
 	}
 	s.log.Info("grpc server listening", "addr", s.addr)
 	return s.grpcServer.Serve(lis)
@@ -43,6 +43,8 @@ func (s *Server) ListenAndServe() error {
 
 // Stop gracefully stops accepting new rpcs and waits for in-flight ones to finish.
 func (s *Server) Stop() {
-	s.log.Info("grpc server stopping", "addr", s.addr)
-	s.grpcServer.GracefulStop()
+	s.stopOnce.Do(func() {
+		s.log.Info("grpc server stopping", "addr", s.addr)
+		s.grpcServer.GracefulStop()
+	})
 }

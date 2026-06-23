@@ -13,65 +13,66 @@ import (
 
 // bolt bucket names as constants so typos fail at compile time not at runtime
 var (
-	filesBucket = []byte("files")
-	nodesBucket = []byte("nodes")
+	filesBucket         = []byte("files")
+	nodesBucket         = []byte("nodes")
+	filenameIndexBucket = []byte("filename_index")
 )
 
-// BoltStore implements Store on top of embedded boltdb for single-master metadata.
+// BoltStore implements MetadataStore using bbolt.
+// bbolt is chosen over sqlite because it's pure go (no cgo), embeds cleanly,
+// and is fast enough for our metadata volumes without a full sql engine
 type BoltStore struct {
-	// db handle is shared; boltdb serializes writers so we don't need an extra mutex layer
-	db *bolt.DB
+	db *bolt.DB // single writer, many readers — matches our access pattern
 }
 
 // NewBoltStore opens or creates the metadata database under dataDir.
 func NewBoltStore(dataDir string) (*BoltStore, error) {
-	// mkdir all parents because fresh containers mount empty volumes without intermediate dirs
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create metadata data dir: %w", err)
+		return nil, fmt.Errorf("metadata.NewBoltStore: create data dir: %w", err)
 	}
 
 	dbPath := filepath.Join(dataDir, "metadata.db")
 	db, err := bolt.Open(dbPath, 0o600, nil)
 	if err != nil {
-		return nil, fmt.Errorf("open boltdb %s: %w", dbPath, err)
+		return nil, fmt.Errorf("metadata.NewBoltStore: open %s: %w", dbPath, err)
 	}
 
-	// create buckets up front so read paths don't need lazy-create branches
 	if err := db.Update(func(tx *bolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists(filesBucket); err != nil {
-			return err
-		}
-		if _, err := tx.CreateBucketIfNotExists(nodesBucket); err != nil {
-			return err
+		for _, name := range [][]byte{filesBucket, nodesBucket, filenameIndexBucket} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("init boltdb buckets: %w", err)
+		return nil, fmt.Errorf("metadata.NewBoltStore: init buckets: %w", err)
 	}
 
 	return &BoltStore{db: db}, nil
 }
 
-// PutFile serializes FileMetadata as json and stores it keyed by FileID.
-func (s *BoltStore) PutFile(ctx context.Context, meta domain.FileMetadata) error {
-	// honor upstream cancellation before we grab a boltdb write lock
+// SaveFile serializes metadata and updates the filename index in one transaction.
+func (s *BoltStore) SaveFile(ctx context.Context, meta *domain.FileMetadata) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	data, err := json.Marshal(meta)
 	if err != nil {
-		return fmt.Errorf("marshal file metadata: %w", err)
+		return fmt.Errorf("metadata.SaveFile: marshal %s: %w", meta.FileID, err)
 	}
 
 	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filesBucket)
-		return b.Put([]byte(meta.FileID), data)
+		if err := tx.Bucket(filesBucket).Put([]byte(meta.FileID), data); err != nil {
+			return err
+		}
+		// filename index supports lookup by original client name without scanning all files
+		return tx.Bucket(filenameIndexBucket).Put([]byte(meta.FileName), []byte(meta.FileID))
 	})
 }
 
-// GetFile loads and unmarshals a file record by id.
+// GetFile loads file metadata by id.
 func (s *BoltStore) GetFile(ctx context.Context, fileID string) (*domain.FileMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -79,60 +80,111 @@ func (s *BoltStore) GetFile(ctx context.Context, fileID string) (*domain.FileMet
 
 	var meta domain.FileMetadata
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filesBucket)
-		raw := b.Get([]byte(fileID))
+		raw := tx.Bucket(filesBucket).Get([]byte(fileID))
 		if raw == nil {
 			return fmt.Errorf("file %s not found", fileID)
 		}
 		return json.Unmarshal(raw, &meta)
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("metadata.GetFile: %s: %w", fileID, err)
 	}
 	return &meta, nil
 }
 
-// DeleteFile removes a file record from the files bucket.
+// DeleteFile removes file metadata and its filename index entry.
 func (s *BoltStore) DeleteFile(ctx context.Context, fileID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(filesBucket).Delete([]byte(fileID))
+		files := tx.Bucket(filesBucket)
+		raw := files.Get([]byte(fileID))
+		if raw == nil {
+			return fmt.Errorf("file %s not found", fileID)
+		}
+		var meta domain.FileMetadata
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return fmt.Errorf("metadata.DeleteFile: unmarshal %s: %w", fileID, err)
+		}
+		if err := files.Delete([]byte(fileID)); err != nil {
+			return err
+		}
+		return tx.Bucket(filenameIndexBucket).Delete([]byte(meta.FileName))
 	})
 }
 
-// ListFiles scans the files bucket and unmarshals every value.
-func (s *BoltStore) ListFiles(ctx context.Context) ([]domain.FileMetadata, error) {
+// ListFiles returns all file metadata records for crash recovery and listing apis.
+func (s *BoltStore) ListFiles(ctx context.Context) ([]*domain.FileMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	var out []domain.FileMetadata
+	var out []*domain.FileMetadata
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filesBucket)
-		return b.ForEach(func(k, v []byte) error {
+		return tx.Bucket(filesBucket).ForEach(func(_, v []byte) error {
 			var meta domain.FileMetadata
 			if err := json.Unmarshal(v, &meta); err != nil {
-				// skip corrupt rows in phase 1; phase 3 will add repair tooling
 				return nil
 			}
-			out = append(out, meta)
+			m := meta
+			out = append(out, &m)
 			return nil
 		})
 	})
-	return out, err
+	if err != nil {
+		return nil, fmt.Errorf("metadata.ListFiles: %w", err)
+	}
+	return out, nil
 }
 
-// PutNode upserts a storage node record keyed by NodeID.
-func (s *BoltStore) PutNode(ctx context.Context, node domain.StorageNode) error {
+// UpdateChunkNodes patches replica locations for one chunk inside a file record.
+func (s *BoltStore) UpdateChunkNodes(ctx context.Context, fileID, chunkID string, nodeIDs []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		files := tx.Bucket(filesBucket)
+		raw := files.Get([]byte(fileID))
+		if raw == nil {
+			return fmt.Errorf("file %s not found", fileID)
+		}
+		var meta domain.FileMetadata
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return fmt.Errorf("metadata.UpdateChunkNodes: unmarshal %s: %w", fileID, err)
+		}
+
+		found := false
+		for i := range meta.Chunks {
+			if meta.Chunks[i].ChunkID == chunkID {
+				meta.Chunks[i].NodeIDs = append([]string(nil), nodeIDs...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("chunk %s not found in file %s", chunkID, fileID)
+		}
+
+		data, err := json.Marshal(&meta)
+		if err != nil {
+			return fmt.Errorf("metadata.UpdateChunkNodes: marshal %s: %w", fileID, err)
+		}
+		return files.Put([]byte(fileID), data)
+	})
+}
+
+// SaveNode persists a storage node record for crash recovery on master restart.
+func (s *BoltStore) SaveNode(ctx context.Context, node *domain.StorageNode) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	data, err := json.Marshal(node)
 	if err != nil {
-		return fmt.Errorf("marshal node: %w", err)
+		return fmt.Errorf("metadata.SaveNode: marshal %s: %w", node.NodeID, err)
 	}
 
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -140,57 +192,31 @@ func (s *BoltStore) PutNode(ctx context.Context, node domain.StorageNode) error 
 	})
 }
 
-// GetNode loads a single storage node by id.
-func (s *BoltStore) GetNode(ctx context.Context, nodeID string) (*domain.StorageNode, error) {
+// ListNodes loads all persisted nodes so master can rebuild registry after crash.
+func (s *BoltStore) ListNodes(ctx context.Context) ([]*domain.StorageNode, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	var node domain.StorageNode
+	var out []*domain.StorageNode
 	err := s.db.View(func(tx *bolt.Tx) error {
-		raw := tx.Bucket(nodesBucket).Get([]byte(nodeID))
-		if raw == nil {
-			return fmt.Errorf("node %s not found", nodeID)
-		}
-		return json.Unmarshal(raw, &node)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &node, nil
-}
-
-// ListNodes returns all registered storage nodes.
-func (s *BoltStore) ListNodes(ctx context.Context) ([]domain.StorageNode, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	var out []domain.StorageNode
-	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(nodesBucket).ForEach(func(k, v []byte) error {
+		return tx.Bucket(nodesBucket).ForEach(func(_, v []byte) error {
 			var node domain.StorageNode
 			if err := json.Unmarshal(v, &node); err != nil {
 				return nil
 			}
-			out = append(out, node)
+			n := node
+			out = append(out, &n)
 			return nil
 		})
 	})
-	return out, err
-}
-
-// DeleteNode removes a node record after drain completes.
-func (s *BoltStore) DeleteNode(ctx context.Context, nodeID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if err != nil {
+		return nil, fmt.Errorf("metadata.ListNodes: %w", err)
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(nodesBucket).Delete([]byte(nodeID))
-	})
+	return out, nil
 }
 
-// Close shuts down boltdb so process exit doesn't leave a stale lock file.
+// Close releases the boltdb handle.
 func (s *BoltStore) Close() error {
 	return s.db.Close()
 }

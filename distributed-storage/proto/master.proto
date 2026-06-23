@@ -2,11 +2,12 @@ syntax = "proto3";
 
 package master.v1;
 
-option go_package = "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/master/v1;masterv1";
+option go_package = "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/masterv1;masterv1";
 
 // MasterService is what storage nodes call on master for registration and reporting.
 service MasterService {
   rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc ReportChunkStored(ReportChunkStoredRequest) returns (ReportChunkStoredResponse);
 }
 
@@ -21,6 +22,18 @@ message RegisterNodeResponse {
   string assigned_node_id = 1;
   bool accepted = 2;
   string message = 3;
+}
+
+// HeartbeatRequest is sent periodically by storage nodes so master can track liveness.
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 used_space = 2;
+  int64 total_space = 3;
+  int32 chunk_count = 4;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
 }
 
 // ReportChunkStoredRequest tells master a replica landed so metadata can be updated.

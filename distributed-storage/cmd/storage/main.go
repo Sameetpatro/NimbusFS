@@ -15,6 +15,7 @@ import (
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/heartbeat"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/storage"
+	storagev1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storagev1"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -32,7 +33,6 @@ func main() {
 
 	log := logger.New(cfg.Observability.LogLevel).WithComponent("storage")
 
-	// auto-generate node id when docker-compose doesn't inject NODE_ID
 	nodeID := cfg.Node.NodeID
 	if nodeID == "" {
 		nodeID = uuid.NewString()
@@ -40,48 +40,44 @@ func main() {
 	}
 	log = log.WithNodeID(nodeID)
 
-	localStore, err := storage.NewLocalStore(cfg.Storage.DataDir)
+	diskStore, err := storage.NewDiskStore(cfg.Storage.DataDir)
 	if err != nil {
-		log.Error("open local store", "error", err)
+		log.Error("open disk store", "error", err)
 		os.Exit(1)
 	}
 
 	port := *grpcPort
 	if port == 0 {
-		// storage nodes in compose expose 9091-9095; default for bare-metal dev
 		port = 9091
 	}
 	grpcAddr := fmt.Sprintf("0.0.0.0:%d", port)
+	advertiseAddr := cfg.StorageAdvertiseAddr(port)
 
-	grpcSrv := grpcserver.NewServer(grpcAddr, log)
+	totalSpace, _ := diskStore.TotalBytes()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// heartbeat sender stub until master grpc client is wired in phase 2
+	if err := heartbeat.RegisterWithMaster(ctx, cfg.MasterGRPCAddr(), nodeID, advertiseAddr, totalSpace, log); err != nil {
+		log.Error("register with master", "error", err)
+		os.Exit(1)
+	}
+
 	sender := heartbeat.NewSender(
-		time.Duration(cfg.Node.HeartbeatInterval)*time.Second,
 		nodeID,
+		cfg.MasterGRPCAddr(),
+		diskStore,
+		time.Duration(cfg.Node.HeartbeatInterval)*time.Second,
 		log,
-		func(ctx context.Context, id string, used, total int64, chunks int) error {
-			_ = ctx
-			_ = id
-			_ = used
-			_ = total
-			_ = chunks
-			return nil
-		},
 	)
+
+	grpcSrv := grpcserver.NewServer(grpcAddr, log)
+	storagev1.RegisterStorageServiceServer(grpcSrv.GRPC(), grpcserver.NewStorageGRPCServer(diskStore, nodeID))
 
 	errCh := make(chan error, 3)
 
 	go func() {
-		errCh <- sender.Run(ctx, func() (int64, int64, int) {
-			used, _ := localStore.UsedBytes()
-			count, _ := localStore.ChunkCount()
-			// total disk space reporting lands in phase 2 with syscall.Statfs
-			return used, 0, count
-		})
+		errCh <- sender.Start(ctx)
 	}()
 
 	go func() {

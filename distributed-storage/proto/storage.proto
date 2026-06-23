@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package storage.v1;
 
-option go_package = "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storage/v1;storagev1";
+option go_package = "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storagev1;storagev1";
 
 // StorageService is the grpc interface storage nodes expose to each other and to master.
 // using streaming rpcs for chunk transfer avoids loading full chunks into memory
@@ -86,6 +86,8 @@ message ReplicateChunkRequest {
   string source_node_id = 1;
   string chunk_id = 2;
   string file_id = 3;
+  // source_address is host:port of a healthy replica to pull bytes from during re-replication
+  string source_address = 4;
 }
 
 message ReplicateChunkResponse {

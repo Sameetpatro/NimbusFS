@@ -12,15 +12,19 @@ import (
 
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/api"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/config"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/domain"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/grpcserver"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/heartbeat"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/metadata"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/registry"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/replication"
+	masterv1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/masterv1"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
-	// default config path matches docker volume mount in deployments/docker-compose.yml
 	configPath := flag.String("config", "configs/config.yaml", "path to yaml config file")
 	flag.Parse()
 
@@ -32,28 +36,51 @@ func main() {
 
 	log := logger.New(cfg.Observability.LogLevel).WithComponent("master")
 
-	store, err := metadata.NewBoltStore(cfg.Master.DataDir)
+	boltStore, err := metadata.NewBoltStore(cfg.Master.DataDir)
 	if err != nil {
 		log.Error("open metadata store", "error", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer boltStore.Close()
 
-	// gin release mode keeps docker logs quiet; debug is for local dev only
-	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
-	router.Use(gin.Recovery())
-	api.NewHandlers(store, log).Register(router)
+	nodeReg := registry.New()
+	if err := loadRegistryFromBolt(context.Background(), nodeReg, boltStore, log); err != nil {
+		log.Error("crash recovery load nodes", "error", err)
+		os.Exit(1)
+	}
 
-	// metrics on separate mux so we don't mix prometheus middleware with gin routes yet
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
+	grpcPool := grpcserver.NewClientPool(log)
+	defer grpcPool.Close()
+
+	replMgr := replication.NewManager(nodeReg, boltStore, grpcPool, cfg.Storage.ReplicationFactor, log)
+
+	deadCh := make(chan string, cfg.Storage.ReplicationFactor)
+	monitor := heartbeat.NewMonitor(
+		nodeReg,
+		boltStore,
+		replMgr,
+		deadCh,
+		cfg.Node.HeartbeatInterval,
+		cfg.Node.DeadThreshold,
+		log,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// grpc server scaffold; service registration lands in phase 2
-	grpcSrv := grpcserver.NewServer(cfg.MasterGRPCAddr(), log)
+	go monitor.Run(ctx)
+	go replMgr.ListenDeadNodes(ctx, deadCh)
+
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Use(gin.Recovery())
+	api.NewHandlers(boltStore, nodeReg, log).Register(router)
+
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+
+	grpcSrv := grpcserver.NewServer(cfg.MasterGRPCListenAddr(), log)
+	masterv1.RegisterMasterServiceServer(grpcSrv.GRPC(), grpcserver.NewMasterGRPCServer(nodeReg, boltStore, boltStore))
 
 	errCh := make(chan error, 3)
 
@@ -72,7 +99,6 @@ func main() {
 		errCh <- grpcSrv.ListenAndServe()
 	}()
 
-	// block on signal so kubernetes/docker stop sends SIGTERM before we exit
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -86,8 +112,29 @@ func main() {
 	cancel()
 	grpcSrv.Stop()
 
-	// brief grace period so in-flight http requests can finish
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = shutdownCtx
+}
+
+// loadRegistryFromBolt hydrates in-memory registry from boltdb for crash recovery on startup.
+func loadRegistryFromBolt(ctx context.Context, reg *registry.NodeRegistry, store *metadata.BoltStore, log *logger.Logger) error {
+	nodes, err := store.ListNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("master.loadRegistryFromBolt: %w", err)
+	}
+
+	for _, node := range nodes {
+		// mark recovered nodes suspect until a fresh heartbeat proves they're alive
+		node.Status = domain.NodeStatusSuspect
+		reg.Register(node)
+		log.Info("recovered node from boltdb", "node_id", node.NodeID, "address", node.Address)
+	}
+
+	files, err := store.ListFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("master.loadRegistryFromBolt: list files: %w", err)
+	}
+	log.Info("crash recovery complete", "nodes", len(nodes), "files", len(files))
+	return nil
 }

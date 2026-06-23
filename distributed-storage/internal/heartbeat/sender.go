@@ -2,97 +2,177 @@ package heartbeat
 
 import (
 	"context"
+	"fmt"
 	"time"
 
-	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/domain"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/storage"
+	masterv1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/masterv1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
-// Sender periodically pings the master so it knows this storage node is alive.
+const (
+	grpcCallTimeout = 10 * time.Second
+	maxBackoff      = 30 * time.Second
+)
+
+// Sender runs on each storage node, calling master's heartbeat rpc on a ticker.
+// it also reports current disk usage so master can make placement decisions
 type Sender struct {
-	// interval between heartbeats, pulled from config so docker can tune without rebuild
-	interval time.Duration
-	// log helps operators see missed sends before the master marks the node suspect
-	log *logger.Logger
-	// nodeID is included in every heartbeat so master can update the right registry row
-	nodeID string
-	// sendFn is the actual transport call; injected so tests don't need a live grpc server
-	sendFn func(ctx context.Context, nodeID string, usedSpace, totalSpace int64, chunkCount int) error
+	nodeID     string
+	masterAddr string
+	store      *storage.DiskStore
+	interval   time.Duration
+	log        *logger.Logger
 }
 
-// NewSender builds a heartbeat sender with the given interval and callback.
-func NewSender(interval time.Duration, nodeID string, log *logger.Logger, sendFn func(ctx context.Context, nodeID string, usedSpace, totalSpace int64, chunkCount int) error) *Sender {
+// NewSender builds a storage-side heartbeat sender targeting master grpc.
+func NewSender(nodeID, masterAddr string, store *storage.DiskStore, interval time.Duration, log *logger.Logger) *Sender {
 	return &Sender{
-		interval: interval,
-		nodeID:   nodeID,
-		log:      log.WithComponent("heartbeat-sender"),
-		sendFn:   sendFn,
+		nodeID:     nodeID,
+		masterAddr: masterAddr,
+		store:      store,
+		interval:   interval,
+		log:        log.WithComponent("heartbeat-sender"),
 	}
 }
 
-// Run blocks until ctx is cancelled, sending heartbeats on each tick.
-func (s *Sender) Run(ctx context.Context, stats func() (used, total int64, chunks int)) error {
-	// ticker is cleaner than time.Sleep loops because it coalesces missed ticks on slow sends
+// Start sends heartbeats until context is cancelled.
+// using exponential backoff on dial failure so a master restart doesn't flood logs
+func (s *Sender) Start(ctx context.Context) error {
+	backoff := time.Second
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		client, conn, err := s.dialMaster(ctx)
+		if err != nil {
+			s.log.Warn("master dial failed", "error", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		backoff = time.Second
+
+		if err := s.runWithClient(ctx, client); err != nil && ctx.Err() == nil {
+			s.log.Warn("heartbeat loop ended", "error", err)
+		}
+		_ = conn.Close()
+	}
+}
+
+func (s *Sender) dialMaster(ctx context.Context) (masterv1.MasterServiceClient, *grpc.ClientConn, error) {
+	// context.WithTimeout on dial so we never hang forever waiting for master
+	dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
+	defer cancel()
+
+	conn, err := grpc.DialContext(dialCtx, s.masterAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("heartbeat.Sender.dialMaster: %w", err)
+	}
+	return masterv1.NewMasterServiceClient(conn), conn, nil
+}
+
+func (s *Sender) runWithClient(ctx context.Context, client masterv1.MasterServiceClient) error {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			// context propagation lets upstream cancels reach the grpc call, preventing goroutine leaks
 			return ctx.Err()
 		case <-ticker.C:
-			used, total, chunks := stats()
-			if err := s.sendFn(ctx, s.nodeID, used, total, chunks); err != nil {
-				// log but don't exit; transient master outages shouldn't kill the storage process
-				s.log.Warn("heartbeat send failed", "error", err)
+			used, _ := s.store.UsedBytes()
+			total, _ := s.store.TotalBytes()
+			count, _ := s.store.ChunkCount()
+
+			callCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
+			_, err := client.Heartbeat(callCtx, &masterv1.HeartbeatRequest{
+				NodeId:     s.nodeID,
+				UsedSpace:  used,
+				TotalSpace: total,
+				ChunkCount: int32(count),
+			})
+			cancel()
+
+			if err != nil {
+				return fmt.Errorf("heartbeat.Sender: send: %w", err)
 			}
 		}
 	}
 }
 
-// Monitor watches registered nodes and transitions status when heartbeats go missing.
-type Monitor struct {
-	// deadThreshold is how long without heartbeat before we mark a node dead
-	deadThreshold time.Duration
-	// suspectThreshold is half of dead so we get a warning state before re-replication fires
-	suspectThreshold time.Duration
-	log              *logger.Logger
-	// onDead is called when a node transitions to dead so replication can kick in
-	onDead func(ctx context.Context, node domain.StorageNode)
-}
+// RegisterWithMaster registers this storage node with exponential backoff until success.
+func RegisterWithMaster(ctx context.Context, masterAddr, nodeID, advertiseAddr string, totalSpace int64, log *logger.Logger) error {
+	backoff := time.Second
 
-// NewMonitor creates a monitor with thresholds derived from config seconds.
-func NewMonitor(deadThresholdSec int, log *logger.Logger, onDead func(ctx context.Context, node domain.StorageNode)) *Monitor {
-	dead := time.Duration(deadThresholdSec) * time.Second
-	return &Monitor{
-		deadThreshold:    dead,
-		suspectThreshold: dead / 2,
-		log:              log.WithComponent("heartbeat-monitor"),
-		onDead:           onDead,
-	}
-}
-
-// EvaluateNode updates node.Status based on time since LastHeartbeat.
-func (m *Monitor) EvaluateNode(ctx context.Context, node *domain.StorageNode) {
-	since := time.Since(node.LastHeartbeat)
-
-	switch {
-	case since <= m.suspectThreshold:
-		node.Status = domain.NodeStatusAlive
-	case since <= m.deadThreshold:
-		// suspect state gives us a grace window before expensive re-replication work
-		if node.Status != domain.NodeStatusSuspect {
-			m.log.Warn("node suspect", "node_id", node.NodeID, "since", since)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		node.Status = domain.NodeStatusSuspect
-	default:
-		if node.Status != domain.NodeStatusDead {
-			m.log.Error("node dead", "node_id", node.NodeID, "since", since)
-			node.Status = domain.NodeStatusDead
-			if m.onDead != nil {
-				m.onDead(ctx, *node)
+
+		dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
+		conn, err := grpc.DialContext(dialCtx, masterAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		cancel()
+		if err != nil {
+			log.Warn("register dial failed", "error", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
 			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
 		}
+
+		client := masterv1.NewMasterServiceClient(conn)
+		callCtx, callCancel := context.WithTimeout(ctx, grpcCallTimeout)
+		resp, err := client.RegisterNode(callCtx, &masterv1.RegisterNodeRequest{
+			NodeId:     nodeID,
+			Address:    advertiseAddr,
+			TotalSpace: totalSpace,
+		})
+		callCancel()
+		_ = conn.Close()
+
+		if err != nil {
+			log.Warn("register rpc failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		if !resp.Accepted {
+			return fmt.Errorf("heartbeat.RegisterWithMaster: rejected: %s", resp.Message)
+		}
+
+		log.Info("registered with master", "node_id", resp.AssignedNodeId, "address", advertiseAddr)
+		return nil
 	}
 }
