@@ -1,0 +1,9 @@
+bin/
+*.out
+coverage.out
+.git
+.gitignore
+tests/load/
+**/*_test.go
+deployments/grafana
+docs/

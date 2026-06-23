@@ -1,15 +1,16 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
+ENV GOTOOLCHAIN=auto
 RUN apk add --no-cache ca-certificates git
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/storage ./cmd/storage
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/master ./cmd/master
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
-COPY --from=builder /bin/storage /bin/storage
+COPY --from=builder /bin/master /bin/master
 COPY --from=builder /src/configs/config.yaml /etc/nimbusfs/config.yaml
-EXPOSE 9091 9092
-ENTRYPOINT ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml"]
+EXPOSE 8080 9090 9091
+ENTRYPOINT ["/bin/master", "-config", "/etc/nimbusfs/config.yaml"]

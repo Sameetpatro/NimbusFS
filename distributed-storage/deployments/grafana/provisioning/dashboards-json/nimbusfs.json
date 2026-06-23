@@ -1,0 +1,81 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Upload / Download Rate",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(dfs_upload_total[1m])", "legendFormat": "uploads/s" },
+        { "expr": "rate(dfs_download_total[1m])", "legendFormat": "downloads/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Active Nodes (alive)",
+      "type": "stat",
+      "targets": [
+        { "expr": "count(dfs_node_health{status=\"alive\"} == 1)" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Storage Utilization per Node",
+      "type": "barchart",
+      "targets": [
+        { "expr": "dfs_storage_used_bytes", "legendFormat": "{{node_id}}" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(dfs_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(dfs_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(dfs_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Replication Lag",
+      "type": "gauge",
+      "targets": [
+        { "expr": "dfs_replication_lag" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 16 },
+      "id": 6,
+      "title": "HTTP Error Rate (5xx)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(dfs_request_duration_seconds_count{path=~\".+\"}[5m])) - sum(rate(dfs_upload_total[5m]))", "legendFormat": "approx errors" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["nimbusfs", "dfs"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "NimbusFS Dashboard",
+  "uid": "nimbusfs-dashboard",
+  "version": 1
+}

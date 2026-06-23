@@ -1,4 +1,4 @@
-.PHONY: proto build docker-up docker-down test test-unit test-integration test-race vet lint fmt demo clean
+.PHONY: proto build docker-up docker-down docker-logs docker-ps test test-unit test-integration test-race vet lint fmt demo clean
 
 MODULE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BIN_DIR := $(MODULE_ROOT)bin
@@ -16,10 +16,16 @@ $(BIN_DIR)/master $(BIN_DIR)/storage $(BIN_DIR)/client:
 	$(GO) build -o $(BIN_DIR)/$(notdir $@) ./cmd/$(notdir $@)
 
 docker-up:
-	docker compose -f deployments/docker-compose.yml up -d --build
+	docker compose -f deployments/docker-compose.yml up --build -d
 
 docker-down:
-	docker compose -f deployments/docker-compose.yml down -v
+	docker compose -f deployments/docker-compose.yml down
+
+docker-logs:
+	docker compose -f deployments/docker-compose.yml logs -f
+
+docker-ps:
+	docker compose -f deployments/docker-compose.yml ps
 
 test: test-unit
 

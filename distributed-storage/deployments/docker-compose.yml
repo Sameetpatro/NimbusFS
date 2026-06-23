@@ -2,7 +2,7 @@ services:
   master:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.master
+      dockerfile: Dockerfile.master
     container_name: dfs-master
     ports:
       - "8080:8080"
@@ -24,7 +24,7 @@ services:
   storage-1:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.storage
+      dockerfile: Dockerfile.storage
     container_name: dfs-storage-1
     command: ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml", "-grpc-port", "9091"]
     ports:
@@ -50,7 +50,7 @@ services:
   storage-2:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.storage
+      dockerfile: Dockerfile.storage
     container_name: dfs-storage-2
     command: ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml", "-grpc-port", "9091"]
     ports:
@@ -76,7 +76,7 @@ services:
   storage-3:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.storage
+      dockerfile: Dockerfile.storage
     container_name: dfs-storage-3
     command: ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml", "-grpc-port", "9091"]
     ports:
@@ -102,7 +102,7 @@ services:
   storage-4:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.storage
+      dockerfile: Dockerfile.storage
     container_name: dfs-storage-4
     command: ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml", "-grpc-port", "9091"]
     ports:
@@ -128,7 +128,7 @@ services:
   storage-5:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.storage
+      dockerfile: Dockerfile.storage
     container_name: dfs-storage-5
     command: ["/bin/storage", "-config", "/etc/nimbusfs/config.yaml", "-grpc-port", "9091"]
     ports:
@@ -154,7 +154,7 @@ services:
   client:
     build:
       context: ..
-      dockerfile: deployments/Dockerfile.client
+      dockerfile: Dockerfile.client
     container_name: dfs-client
     profiles:
       - tools
@@ -191,7 +191,6 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboard.json:/etc/grafana/provisioning/dashboards-json/nimbusfs.json:ro
     networks:
       - dfs-net
     depends_on:
