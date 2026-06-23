@@ -68,7 +68,7 @@ func (h *Handlers) UploadHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot open uploaded file"})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	result, err := h.upload.Upload(c.Request.Context(), file.Filename, f)
 	if err != nil {

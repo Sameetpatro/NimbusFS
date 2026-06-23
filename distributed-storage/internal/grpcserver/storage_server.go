@@ -138,7 +138,7 @@ func (s *StorageGRPCServer) ReplicateChunk(ctx context.Context, req *storagev1.R
 	if err != nil {
 		return nil, fmt.Errorf("grpcserver.ReplicateChunk: dial source: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := storagev1.NewStorageServiceClient(conn)
 	stream, err := client.RetrieveChunk(callCtx, &storagev1.RetrieveChunkRequest{

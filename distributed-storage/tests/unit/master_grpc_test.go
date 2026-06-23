@@ -19,7 +19,7 @@ func TestMasterGRPCRegisterAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	reg := registry.New()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -28,14 +28,14 @@ func TestMasterGRPCRegisterAndHeartbeat(t *testing.T) {
 	}
 	srv := grpc.NewServer()
 	masterv1.RegisterMasterServiceServer(srv, grpcserver.NewMasterGRPCServer(reg, store, store))
-	go srv.Serve(ln)
+	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 
 	conn, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := masterv1.NewMasterServiceClient(conn)
 
 	ctx := context.Background()

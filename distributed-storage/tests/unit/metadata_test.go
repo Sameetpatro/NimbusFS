@@ -16,7 +16,7 @@ func TestBoltStoreSaveAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	meta := &domain.FileMetadata{
 		FileID: "f-1", FileName: "a.txt", Size: 10, ChunkSize: 4,
@@ -35,7 +35,7 @@ func TestBoltStoreSaveAndGet(t *testing.T) {
 func TestBoltStoreDeleteRemovesFile(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := metadata.NewBoltStore(dir)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	meta := &domain.FileMetadata{FileID: "f-del", FileName: "del.txt", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	_ = store.SaveFile(context.Background(), meta)
@@ -58,7 +58,7 @@ func TestBoltStorePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store2.Close()
+	defer func() { _ = store2.Close() }()
 
 	got, err := store2.GetFile(context.Background(), "persist")
 	if err != nil || got.FileID != "persist" {
@@ -70,7 +70,7 @@ func TestBoltStorePersistence(t *testing.T) {
 func TestBoltStoreUpdateChunkNodes(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := metadata.NewBoltStore(dir)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	meta := &domain.FileMetadata{
 		FileID: "f-1", FileName: "test.txt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
@@ -88,7 +88,7 @@ func TestBoltStoreUpdateChunkNodes(t *testing.T) {
 func TestBoltStoreSaveNodeAndList(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := metadata.NewBoltStore(dir)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	node := &domain.StorageNode{NodeID: "n1", Address: "h:1", Status: domain.NodeStatusAlive}
 	if err := store.SaveNode(context.Background(), node); err != nil {

@@ -45,7 +45,7 @@ func TestMetadataListFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	files, err := store.ListFiles(ctx)

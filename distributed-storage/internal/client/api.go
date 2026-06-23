@@ -43,7 +43,7 @@ func (a *API) Upload(path string, progress io.Writer) (*UploadResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
@@ -73,7 +73,7 @@ func (a *API) Upload(path string, progress io.Writer) (*UploadResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("upload failed: %s", readBody(resp.Body))
@@ -95,7 +95,7 @@ func (a *API) Download(fileID, outputDir string, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("download failed: %s", readBody(resp.Body))
@@ -106,7 +106,7 @@ func (a *API) Download(fileID, outputDir string, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	reader := io.Reader(resp.Body)
 	if progress != nil {
@@ -127,7 +127,7 @@ func (a *API) Delete(fileID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("delete failed: %s", readBody(resp.Body))
 	}
@@ -146,7 +146,7 @@ func (a *API) List(page, limit int) (*ListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var out ListResponse
 	return &out, json.NewDecoder(resp.Body).Decode(&out)
 }
@@ -161,7 +161,7 @@ func (a *API) Status() (*StatusResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var out StatusResponse
 	return &out, json.NewDecoder(resp.Body).Decode(&out)
 }

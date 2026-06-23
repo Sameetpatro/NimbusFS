@@ -48,7 +48,7 @@ func (s *Sender) Start(ctx context.Context) error {
 			return err
 		}
 
-		client, conn, err := s.dialMaster(ctx)
+		client, conn, err := s.dialMaster()
 		if err != nil {
 			s.log.Warn("master dial failed", "error", err, "backoff", backoff)
 			select {
@@ -71,12 +71,8 @@ func (s *Sender) Start(ctx context.Context) error {
 	}
 }
 
-func (s *Sender) dialMaster(ctx context.Context) (masterv1.MasterServiceClient, *grpc.ClientConn, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
-	defer cancel()
-
-	opts := append(grpcserver.DialOptions(s.tlsEnabled), grpc.WithBlock())
-	conn, err := grpc.DialContext(dialCtx, s.masterAddr, opts...)
+func (s *Sender) dialMaster() (masterv1.MasterServiceClient, *grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(s.masterAddr, grpcserver.DialOptions(s.tlsEnabled)...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("heartbeat.Sender.dialMaster: %w", err)
 	}
@@ -121,10 +117,7 @@ func RegisterWithMaster(ctx context.Context, masterAddr, nodeID, advertiseAddr s
 			return err
 		}
 
-		dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
-		opts := append(grpcserver.DialOptions(tlsEnabled), grpc.WithBlock())
-		conn, err := grpc.DialContext(dialCtx, masterAddr, opts...)
-		cancel()
+		conn, err := grpc.NewClient(masterAddr, grpcserver.DialOptions(tlsEnabled)...)
 		if err != nil {
 			log.Warn("register dial failed", "error", err, "backoff", backoff)
 			select {
