@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/apperrors"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/chunking"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/domain"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/grpcserver"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
@@ -20,6 +22,9 @@ import (
 
 const grpcTimeout = 30 * time.Second
 
+// ErrInsufficientStorage is re-exported for callers that already import replication.
+var ErrInsufficientStorage = apperrors.ErrInsufficientStorage
+
 // Manager handles all replication decisions.
 // keeping this separate from master api logic means replication can be tested independently
 type Manager struct {
@@ -28,7 +33,106 @@ type Manager struct {
 	grpcPool     *grpcserver.ClientPool
 	log          *logger.Logger
 	replFactor   int
-	pipelineSize int // buffered channel size = replication_factor for pipelining chunk sends
+	pipelineSize int
+	replLag      int64 // atomic-ish counter for chunks awaiting re-replication
+}
+
+// ReplicationFactor returns configured replica count for uploads.
+func (m *Manager) ReplicationFactor() int {
+	return m.replFactor
+}
+
+// ReplicationLag returns chunks currently waiting for re-replication.
+func (m *Manager) ReplicationLag() float64 {
+	return float64(m.replLag)
+}
+
+// StoreChunkReplicas places one chunk on n healthy nodes concurrently.
+func (m *Manager) StoreChunkReplicas(ctx context.Context, chunk *domain.Chunk) ([]string, error) {
+	nodes, err := m.SelectNodesForChunk(m.replFactor)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", apperrors.ErrInsufficientStorage, err)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, m.pipelineSize)
+	nodeIDs := make([]string, len(nodes))
+
+	for i, node := range nodes {
+		i, node := i, node
+		nodeIDs[i] = node.NodeID
+		g.Go(func() error {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			return m.pushDomainChunk(gctx, node, chunk)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("replication.StoreChunkReplicas: %w", err)
+	}
+	return nodeIDs, nil
+}
+
+// FetchChunkWithFallback tries replicas in order until one succeeds.
+func (m *Manager) FetchChunkWithFallback(ctx context.Context, fileID string, info domain.ChunkInfo) ([]byte, error) {
+	var lastErr error
+	for _, nodeID := range info.NodeIDs {
+		node, ok := m.registry.Get(nodeID)
+		if !ok || node.Status == domain.NodeStatusDead {
+			continue
+		}
+		data, err := m.fetchChunk(ctx, node, fileID, info.ChunkID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := chunking.VerifyBytesChecksum(data, info.ChunkID); err != nil {
+			lastErr = err
+			continue
+		}
+		return data, nil
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("%w: %v", apperrors.ErrChunkUnavailable, lastErr)
+	}
+	return nil, apperrors.ErrChunkUnavailable
+}
+
+// DeleteChunkReplicas sends delete rpc to every node holding the chunk.
+func (m *Manager) DeleteChunkReplicas(ctx context.Context, fileID, chunkID string, nodeIDs []string) error {
+	g, gctx := errgroup.WithContext(ctx)
+	for _, nodeID := range nodeIDs {
+		nodeID := nodeID
+		g.Go(func() error {
+			node, ok := m.registry.Get(nodeID)
+			if !ok {
+				return nil
+			}
+			callCtx, cancel := context.WithTimeout(gctx, grpcTimeout)
+			defer cancel()
+
+			client, err := m.grpcPool.GetClient(node.NodeID, node.Address)
+			if err != nil {
+				return err
+			}
+			_, err = client.DeleteChunk(callCtx, &storagev1.DeleteChunkRequest{
+				ChunkId: chunkID,
+				FileId:  fileID,
+			})
+			return err
+		})
+	}
+	return g.Wait()
+}
+
+func (m *Manager) pushDomainChunk(ctx context.Context, target *domain.StorageNode, chunk *domain.Chunk) error {
+	info := domain.ChunkInfo{
+		ChunkID: chunk.ChunkID,
+		Index:   chunk.Index,
+		Size:    int64(len(chunk.Data)),
+	}
+	return m.pushChunk(ctx, target, chunk.FileID, info, chunk.Data)
 }
 
 // NewManager wires replication dependencies from master startup.
@@ -82,6 +186,7 @@ func (m *Manager) SelectNodesForChunk(n int) ([]*domain.StorageNode, error) {
 // ReReplicateFromDeadNode finds all chunks on deadNodeID and replicates them elsewhere.
 func (m *Manager) ReReplicateFromDeadNode(ctx context.Context, deadNodeID string) {
 	m.log.Info("starting re-replication", "dead_node", deadNodeID)
+	m.replLag++
 
 	files, err := m.store.ListFiles(ctx)
 	if err != nil {
@@ -106,6 +211,7 @@ func (m *Manager) ReReplicateFromDeadNode(ctx context.Context, deadNodeID string
 		}
 	}
 	wg.Wait()
+	m.replLag--
 	m.log.Info("re-replication complete", "dead_node", deadNodeID)
 }
 

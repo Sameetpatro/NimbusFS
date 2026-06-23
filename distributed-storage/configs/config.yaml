@@ -17,6 +17,13 @@ node:
 auth:
   jwt_secret: "change-me-in-production"
   api_key_header: "X-API-Key"
+  api_keys:
+    - "dev-api-key-change-me"
+
+api:
+  rate_limit_rps: 100
+  rate_limit_burst: 200
+  max_upload_mb: 32
 
 observability:
   metrics_port: 9091

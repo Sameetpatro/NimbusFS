@@ -17,10 +17,10 @@ import (
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/heartbeat"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/metadata"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/observability"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/registry"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/replication"
 	masterv1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/masterv1"
-	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -35,6 +35,7 @@ func main() {
 	}
 
 	log := logger.New(cfg.Observability.LogLevel).WithComponent("master")
+	metrics := observability.NewMetrics()
 
 	boltStore, err := metadata.NewBoltStore(cfg.Master.DataDir)
 	if err != nil {
@@ -71,10 +72,21 @@ func main() {
 	go monitor.Run(ctx)
 	go replMgr.ListenDeadNodes(ctx, deadCh)
 
-	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
-	router.Use(gin.Recovery())
-	api.NewHandlers(boltStore, nodeReg, log).Register(router)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				metrics.UpdateNodeMetrics(nodeReg)
+				metrics.UpdateReplicationLag(replMgr)
+			}
+		}
+	}()
+
+	router := api.NewRouter(cfg, boltStore, nodeReg, replMgr, grpcPool, metrics, log)
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
@@ -111,13 +123,8 @@ func main() {
 
 	cancel()
 	grpcSrv.Stop()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	_ = shutdownCtx
 }
 
-// loadRegistryFromBolt hydrates in-memory registry from boltdb for crash recovery on startup.
 func loadRegistryFromBolt(ctx context.Context, reg *registry.NodeRegistry, store *metadata.BoltStore, log *logger.Logger) error {
 	nodes, err := store.ListNodes(ctx)
 	if err != nil {
@@ -125,7 +132,6 @@ func loadRegistryFromBolt(ctx context.Context, reg *registry.NodeRegistry, store
 	}
 
 	for _, node := range nodes {
-		// mark recovered nodes suspect until a fresh heartbeat proves they're alive
 		node.Status = domain.NodeStatusSuspect
 		reg.Register(node)
 		log.Info("recovered node from boltdb", "node_id", node.NodeID, "address", node.Address)

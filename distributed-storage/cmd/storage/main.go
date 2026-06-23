@@ -14,6 +14,7 @@ import (
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/grpcserver"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/heartbeat"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/observability"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/storage"
 	storagev1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storagev1"
 	"github.com/google/uuid"
@@ -45,6 +46,7 @@ func main() {
 		log.Error("open disk store", "error", err)
 		os.Exit(1)
 	}
+	observability.RegisterStorageNodeCollector(nodeID, diskStore)
 
 	port := *grpcPort
 	if port == 0 {

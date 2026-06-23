@@ -167,6 +167,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboard.json:/etc/grafana/provisioning/dashboards-json/nimbusfs.json:ro
     networks:
       - dfs-net
     depends_on:
