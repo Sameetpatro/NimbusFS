@@ -65,6 +65,11 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
+// ScanOnce runs one monitor pass; exported for unit tests.
+func (m *Monitor) ScanOnce(ctx context.Context) {
+	m.scan(ctx)
+}
+
 func (m *Monitor) scan(ctx context.Context) {
 	nodes := m.registry.List()
 	now := time.Now()

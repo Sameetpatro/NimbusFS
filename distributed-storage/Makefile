@@ -1,29 +1,19 @@
-.PHONY: proto build docker-up docker-down test test-integration lint fmt clean
+.PHONY: proto build docker-up docker-down test test-unit test-integration test-race vet lint fmt demo clean
 
 MODULE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BIN_DIR := $(MODULE_ROOT)bin
-
 GO := go
 PROTO_SCRIPT := $(MODULE_ROOT)scripts/generate_proto.sh
 
-# proto generation requires protoc, protoc-gen-go, and protoc-gen-go-grpc on PATH
 proto:
 	chmod +x $(PROTO_SCRIPT)
-	$(PROTO_SCRIPT)
+	PATH="$$(go env GOPATH)/bin:$$PATH" $(PROTO_SCRIPT)
 
 build: $(BIN_DIR)/master $(BIN_DIR)/storage $(BIN_DIR)/client
 
-$(BIN_DIR)/master:
+$(BIN_DIR)/master $(BIN_DIR)/storage $(BIN_DIR)/client:
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -o $@ ./cmd/master
-
-$(BIN_DIR)/storage:
-	@mkdir -p $(BIN_DIR)
-	$(GO) build -o $@ ./cmd/storage
-
-$(BIN_DIR)/client:
-	@mkdir -p $(BIN_DIR)
-	$(GO) build -o $@ ./cmd/client
+	$(GO) build -o $(BIN_DIR)/$(notdir $@) ./cmd/$(notdir $@)
 
 docker-up:
 	docker compose -f deployments/docker-compose.yml up -d --build
@@ -31,11 +21,23 @@ docker-up:
 docker-down:
 	docker compose -f deployments/docker-compose.yml down -v
 
-test:
-	$(GO) test ./... -count=1 -short
+test: test-unit
+
+test-unit:
+	$(GO) test ./tests/unit/... -count=1
 
 test-integration:
-	$(GO) test ./tests/integration/... -count=1 -tags=integration
+	$(GO) test ./tests/integration/... -count=1 -tags=integration -timeout=10m
+
+test-race:
+	$(GO) test -race ./tests/unit/... -count=1
+
+test-cover:
+	$(GO) test -coverpkg=./internal/... -coverprofile=coverage.out ./tests/unit/... ./internal/config/... -count=1
+	$(GO) tool cover -func=coverage.out | tail -1
+
+vet:
+	$(GO) vet ./...
 
 lint:
 	golangci-lint run ./...
@@ -43,6 +45,9 @@ lint:
 fmt:
 	gofmt -w .
 	goimports -w .
+
+demo:
+	./scripts/demo.sh
 
 clean:
 	rm -rf $(BIN_DIR)

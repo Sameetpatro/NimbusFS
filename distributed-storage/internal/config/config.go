@@ -53,6 +53,13 @@ type ObservabilityConfig struct {
 	LogLevel    string `yaml:"log_level"`
 }
 
+// TLSConfig controls optional mTLS between nodes.
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
 // Config is the top-level config struct, mirroring config.yaml shape exactly.
 type Config struct {
 	Master        MasterConfig
@@ -60,6 +67,7 @@ type Config struct {
 	Node          NodeConfig
 	Auth          AuthConfig
 	API           APIConfig
+	TLS           TLSConfig
 	Observability ObservabilityConfig
 }
 
@@ -70,6 +78,11 @@ func LoadConfig(path string) (*Config, error) {
 			RateLimitRPS:   100,
 			RateLimitBurst: 200,
 			MaxUploadMB:    32,
+		},
+		TLS: TLSConfig{
+			Enabled:  true,
+			CertFile: "/data/certs/server.pem",
+			KeyFile:  "/data/certs/server.key",
 		},
 	}
 
@@ -167,6 +180,15 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("STORAGE_GRPC_ADDR"); v != "" {
 		cfg.Node.AdvertiseAddr = v
+	}
+	if v := os.Getenv("TLS_ENABLED"); v != "" {
+		cfg.TLS.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
+		cfg.TLS.CertFile = v
+	}
+	if v := os.Getenv("TLS_KEY_FILE"); v != "" {
+		cfg.TLS.KeyFile = v
 	}
 }
 

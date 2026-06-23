@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/grpcserver"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/logger"
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/storage"
 	masterv1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/masterv1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -18,28 +18,28 @@ const (
 )
 
 // Sender runs on each storage node, calling master's heartbeat rpc on a ticker.
-// it also reports current disk usage so master can make placement decisions
 type Sender struct {
 	nodeID     string
 	masterAddr string
 	store      *storage.DiskStore
 	interval   time.Duration
 	log        *logger.Logger
+	tlsEnabled bool
 }
 
 // NewSender builds a storage-side heartbeat sender targeting master grpc.
-func NewSender(nodeID, masterAddr string, store *storage.DiskStore, interval time.Duration, log *logger.Logger) *Sender {
+func NewSender(nodeID, masterAddr string, store *storage.DiskStore, interval time.Duration, log *logger.Logger, tlsEnabled bool) *Sender {
 	return &Sender{
 		nodeID:     nodeID,
 		masterAddr: masterAddr,
 		store:      store,
 		interval:   interval,
 		log:        log.WithComponent("heartbeat-sender"),
+		tlsEnabled: tlsEnabled,
 	}
 }
 
 // Start sends heartbeats until context is cancelled.
-// using exponential backoff on dial failure so a master restart doesn't flood logs
 func (s *Sender) Start(ctx context.Context) error {
 	backoff := time.Second
 
@@ -72,14 +72,11 @@ func (s *Sender) Start(ctx context.Context) error {
 }
 
 func (s *Sender) dialMaster(ctx context.Context) (masterv1.MasterServiceClient, *grpc.ClientConn, error) {
-	// context.WithTimeout on dial so we never hang forever waiting for master
 	dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, s.masterAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-	)
+	opts := append(grpcserver.DialOptions(s.tlsEnabled), grpc.WithBlock())
+	conn, err := grpc.DialContext(dialCtx, s.masterAddr, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("heartbeat.Sender.dialMaster: %w", err)
 	}
@@ -116,7 +113,7 @@ func (s *Sender) runWithClient(ctx context.Context, client masterv1.MasterServic
 }
 
 // RegisterWithMaster registers this storage node with exponential backoff until success.
-func RegisterWithMaster(ctx context.Context, masterAddr, nodeID, advertiseAddr string, totalSpace int64, log *logger.Logger) error {
+func RegisterWithMaster(ctx context.Context, masterAddr, nodeID, advertiseAddr string, totalSpace int64, log *logger.Logger, tlsEnabled bool) error {
 	backoff := time.Second
 
 	for {
@@ -125,10 +122,8 @@ func RegisterWithMaster(ctx context.Context, masterAddr, nodeID, advertiseAddr s
 		}
 
 		dialCtx, cancel := context.WithTimeout(ctx, grpcCallTimeout)
-		conn, err := grpc.DialContext(dialCtx, masterAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithBlock(),
-		)
+		opts := append(grpcserver.DialOptions(tlsEnabled), grpc.WithBlock())
+		conn, err := grpc.DialContext(dialCtx, masterAddr, opts...)
 		cancel()
 		if err != nil {
 			log.Warn("register dial failed", "error", err, "backoff", backoff)

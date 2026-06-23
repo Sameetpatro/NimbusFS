@@ -11,8 +11,12 @@ services:
       MASTER_HOST: "0.0.0.0"
       MASTER_DATA_DIR: "/data/master"
       LOG_LEVEL: "info"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - master-data:/data/master
+      - master-certs:/data/certs
     networks:
       - dfs-net
     restart: unless-stopped
@@ -31,8 +35,12 @@ services:
       METRICS_PORT: "9101"
       MASTER_GRPC_ADDR: "master:9090"
       STORAGE_GRPC_ADDR: "storage-1:9091"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - storage-1-data:/data/storage
+      - storage-1-certs:/data/certs
     networks:
       - dfs-net
     depends_on:
@@ -53,8 +61,12 @@ services:
       METRICS_PORT: "9102"
       MASTER_GRPC_ADDR: "master:9090"
       STORAGE_GRPC_ADDR: "storage-2:9091"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - storage-2-data:/data/storage
+      - storage-2-certs:/data/certs
     networks:
       - dfs-net
     depends_on:
@@ -75,8 +87,12 @@ services:
       METRICS_PORT: "9103"
       MASTER_GRPC_ADDR: "master:9090"
       STORAGE_GRPC_ADDR: "storage-3:9091"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - storage-3-data:/data/storage
+      - storage-3-certs:/data/certs
     networks:
       - dfs-net
     depends_on:
@@ -97,8 +113,12 @@ services:
       METRICS_PORT: "9104"
       MASTER_GRPC_ADDR: "master:9090"
       STORAGE_GRPC_ADDR: "storage-4:9091"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - storage-4-data:/data/storage
+      - storage-4-certs:/data/certs
     networks:
       - dfs-net
     depends_on:
@@ -119,8 +139,12 @@ services:
       METRICS_PORT: "9105"
       MASTER_GRPC_ADDR: "master:9090"
       STORAGE_GRPC_ADDR: "storage-5:9091"
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: "/data/certs/server.pem"
+      TLS_KEY_FILE: "/data/certs/server.key"
     volumes:
       - storage-5-data:/data/storage
+      - storage-5-certs:/data/certs
     networks:
       - dfs-net
     depends_on:
@@ -180,10 +204,16 @@ networks:
 
 volumes:
   master-data:
+  master-certs:
   storage-1-data:
+  storage-1-certs:
   storage-2-data:
+  storage-2-certs:
   storage-3-data:
+  storage-3-certs:
   storage-4-data:
+  storage-4-certs:
   storage-5-data:
+  storage-5-certs:
   prometheus-data:
   grafana-data:

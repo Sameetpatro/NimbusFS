@@ -19,6 +19,7 @@ auth:
   api_key_header: "X-API-Key"
   api_keys:
     - "dev-api-key-change-me"
+    - "demo-key"
 
 api:
   rate_limit_rps: 100
@@ -28,3 +29,8 @@ api:
 observability:
   metrics_port: 9091
   log_level: "info"
+
+tls:
+  enabled: true
+  cert_file: "/data/certs/server.pem"
+  key_file: "/data/certs/server.key"

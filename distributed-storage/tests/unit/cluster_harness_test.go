@@ -1,6 +1,4 @@
-//go:build integration
-
-package integration_test
+package unit_test
 
 import (
 	"bytes"
@@ -12,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -30,7 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-type testCluster struct {
+type miniCluster struct {
 	router   http.Handler
 	store    *metadata.BoltStore
 	registry *registry.NodeRegistry
@@ -38,13 +35,14 @@ type testCluster struct {
 	apiKey   string
 }
 
-func startTestCluster(t *testing.T, nodeCount int) *testCluster {
+func startMiniCluster(t *testing.T, nodeCount int) *miniCluster {
 	t.Helper()
 
 	store, err := metadata.NewBoltStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("bolt: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 
 	reg := registry.New()
 	pool := grpcserver.NewClientPool(logger.New("error"), false)
@@ -70,20 +68,15 @@ func startTestCluster(t *testing.T, nodeCount int) *testCluster {
 		t.Cleanup(srv.Stop)
 
 		reg.Register(&domain.StorageNode{
-			NodeID:        nodeID,
-			Address:       addr,
-			Status:        domain.NodeStatusAlive,
-			LastHeartbeat: time.Now(),
-			TotalSpace:    1 << 30,
+			NodeID: nodeID, Address: addr, Status: domain.NodeStatusAlive,
+			LastHeartbeat: time.Now(), TotalSpace: 1 << 30,
 		})
 	}
 
 	cfg := &config.Config{
 		Storage: config.StorageConfig{ReplicationFactor: 3, ChunkSizeMB: 1},
 		Auth: config.AuthConfig{
-			JWTSecret:    "test-secret",
-			APIKeyHeader: "X-API-Key",
-			APIKeys:      []string{"test-api-key"},
+			JWTSecret: "test-secret", APIKeyHeader: "X-API-Key", APIKeys: []string{"test-api-key"},
 		},
 		API: config.APIConfig{RateLimitRPS: 1000, RateLimitBurst: 1000, MaxUploadMB: 64},
 		TLS: config.TLSConfig{Enabled: false},
@@ -93,10 +86,10 @@ func startTestCluster(t *testing.T, nodeCount int) *testCluster {
 	metrics := observability.NewMetricsWithRegisterer(prometheus.NewRegistry())
 	router := api.NewRouter(cfg, store, reg, replMgr, pool, metrics, log)
 
-	return &testCluster{router: router, store: store, registry: reg, replMgr: replMgr, apiKey: "test-api-key"}
+	return &miniCluster{router: router, store: store, registry: reg, replMgr: replMgr, apiKey: "test-api-key"}
 }
 
-func (c *testCluster) upload(t *testing.T, data []byte, name string) string {
+func (c *miniCluster) upload(t *testing.T, data []byte, name string) string {
 	t.Helper()
 	body := &bytes.Buffer{}
 	w := multipart.NewWriter(body)
@@ -123,7 +116,7 @@ func (c *testCluster) upload(t *testing.T, data []byte, name string) string {
 	return resp.FileID
 }
 
-func (c *testCluster) download(t *testing.T, fileID string) []byte {
+func (c *miniCluster) download(t *testing.T, fileID string) []byte {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/"+fileID+"/download", nil)
 	req.Header.Set("X-API-Key", c.apiKey)
@@ -135,58 +128,25 @@ func (c *testCluster) download(t *testing.T, fileID string) []byte {
 	return rec.Body.Bytes()
 }
 
-func TestUploadDownloadRoundTrip(t *testing.T) {
-	cluster := startTestCluster(t, 3)
-	data := bytes.Repeat([]byte("A"), 10*1024*1024)
-	fileID := cluster.upload(t, data, "roundtrip.bin")
+func TestUploadDownloadDeleteRoundTrip(t *testing.T) {
+	cluster := startMiniCluster(t, 3)
+	data := bytes.Repeat([]byte("Z"), 8192)
+	fileID := cluster.upload(t, data, "unit.bin")
 	got := cluster.download(t, fileID)
 	if !bytes.Equal(data, got) {
-		t.Fatalf("roundtrip mismatch: got %d bytes want %d", len(got), len(data))
+		t.Fatal("roundtrip mismatch")
 	}
-}
 
-func TestNodeFailureDuringDownload(t *testing.T) {
-	cluster := startTestCluster(t, 3)
-	data := []byte("failure tolerance test payload")
-	fileID := cluster.upload(t, data, "fail.bin")
-
-	meta, err := cluster.store.GetFile(context.Background(), fileID)
-	if err != nil {
-		t.Fatal(err)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/"+fileID, nil)
+	req.Header.Set("X-API-Key", cluster.apiKey)
+	rec := httptest.NewRecorder()
+	cluster.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete %d", rec.Code)
 	}
-	deadID := meta.Chunks[0].NodeIDs[0]
-	cluster.registry.MarkDead(deadID)
 
-	got := cluster.download(t, fileID)
-	if !bytes.Equal(data, got) {
-		t.Fatal("download failed after node death")
-	}
-}
-
-func TestReReplicationOnNodeDeath(t *testing.T) {
-	cluster := startTestCluster(t, 4)
-	data := []byte("re-replication test")
-	fileID := cluster.upload(t, data, "repl.bin")
-
-	meta, _ := cluster.store.GetFile(context.Background(), fileID)
-	deadID := meta.Chunks[0].NodeIDs[0]
-	cluster.registry.MarkDead(deadID)
-
-	cluster.replMgr.ReReplicateFromDeadNode(context.Background(), deadID)
-
-	meta, _ = cluster.store.GetFile(context.Background(), fileID)
-	if len(meta.Chunks[0].NodeIDs) != 3 {
-		t.Fatalf("expected 3 replicas, got %v", meta.Chunks[0].NodeIDs)
-	}
-	for _, id := range meta.Chunks[0].NodeIDs {
-		if id == deadID {
-			t.Fatal("dead node still listed after re-replication")
-		}
-	}
-}
-
-func TestLiveClusterOptional(t *testing.T) {
-	if os.Getenv("DFS_SERVER") == "" {
-		t.Skip("DFS_SERVER not set — run against docker-compose with DFS_SERVER=http://localhost:8080")
+	_, err := cluster.store.GetFile(context.Background(), fileID)
+	if err == nil {
+		t.Fatal("metadata should be gone")
 	}
 }

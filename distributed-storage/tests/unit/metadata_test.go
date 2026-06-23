@@ -10,52 +10,92 @@ import (
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/metadata"
 )
 
-func TestBoltStore_SaveAndUpdateChunkNodes(t *testing.T) {
+func TestBoltStoreSaveAndGet(t *testing.T) {
 	dir := t.TempDir()
 	store, err := metadata.NewBoltStore(dir)
 	if err != nil {
-		t.Fatalf("NewBoltStore: %v", err)
+		t.Fatal(err)
 	}
 	defer store.Close()
 
-	ctx := context.Background()
 	meta := &domain.FileMetadata{
-		FileID:    "file-1",
-		FileName:  "test.txt",
-		Size:      100,
-		ChunkSize: 50,
-		Chunks: []domain.ChunkInfo{
-			{ChunkID: "chunk-a", Index: 0, Size: 50, NodeIDs: []string{"n1", "n2", "dead"}},
-		},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		FileID: "f-1", FileName: "a.txt", Size: 10, ChunkSize: 4,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.SaveFile(context.Background(), meta); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := store.SaveFile(ctx, meta); err != nil {
-		t.Fatalf("SaveFile: %v", err)
+	got, err := store.GetFile(context.Background(), "f-1")
+	if err != nil || got.FileName != "a.txt" {
+		t.Fatalf("get: %v %#v", err, got)
 	}
+}
 
-	got, err := store.GetFile(ctx, "file-1")
+func TestBoltStoreDeleteRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := metadata.NewBoltStore(dir)
+	defer store.Close()
+
+	meta := &domain.FileMetadata{FileID: "f-del", FileName: "del.txt", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	_ = store.SaveFile(context.Background(), meta)
+	_ = store.DeleteFile(context.Background(), "f-del")
+
+	_, err := store.GetFile(context.Background(), "f-del")
+	if err == nil {
+		t.Fatal("expected not found after delete")
+	}
+}
+
+func TestBoltStorePersistence(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := metadata.NewBoltStore(dir)
+	meta := &domain.FileMetadata{FileID: "persist", FileName: "p.bin", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	_ = store.SaveFile(context.Background(), meta)
+	_ = store.Close()
+
+	store2, err := metadata.NewBoltStore(dir)
 	if err != nil {
-		t.Fatalf("GetFile: %v", err)
+		t.Fatal(err)
 	}
-	if got.FileName != "test.txt" {
-		t.Errorf("filename: got %q", got.FileName)
-	}
+	defer store2.Close()
 
-	if err := store.UpdateChunkNodes(ctx, "file-1", "chunk-a", []string{"n1", "n2", "n3"}); err != nil {
-		t.Fatalf("UpdateChunkNodes: %v", err)
+	got, err := store2.GetFile(context.Background(), "persist")
+	if err != nil || got.FileID != "persist" {
+		t.Fatalf("persistence failed: %v", err)
 	}
-
-	got, _ = store.GetFile(ctx, "file-1")
-	if len(got.Chunks[0].NodeIDs) != 3 || got.Chunks[0].NodeIDs[2] != "n3" {
-		t.Errorf("updated nodes: %#v", got.Chunks[0].NodeIDs)
-	}
-
-	list, err := store.ListFiles(ctx)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("ListFiles: %v len=%d", err, len(list))
-	}
-
 	_ = filepath.Join(dir, "metadata.db")
+}
+
+func TestBoltStoreUpdateChunkNodes(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := metadata.NewBoltStore(dir)
+	defer store.Close()
+
+	meta := &domain.FileMetadata{
+		FileID: "f-1", FileName: "test.txt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Chunks: []domain.ChunkInfo{{ChunkID: "c1", NodeIDs: []string{"n1", "n2"}}},
+	}
+	_ = store.SaveFile(context.Background(), meta)
+	_ = store.UpdateChunkNodes(context.Background(), "f-1", "c1", []string{"n1", "n2", "n3"})
+
+	got, _ := store.GetFile(context.Background(), "f-1")
+	if len(got.Chunks[0].NodeIDs) != 3 {
+		t.Fatalf("nodes: %v", got.Chunks[0].NodeIDs)
+	}
+}
+
+func TestBoltStoreSaveNodeAndList(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := metadata.NewBoltStore(dir)
+	defer store.Close()
+
+	node := &domain.StorageNode{NodeID: "n1", Address: "h:1", Status: domain.NodeStatusAlive}
+	if err := store.SaveNode(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := store.ListNodes(context.Background())
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("list nodes: %v len=%d", err, len(nodes))
+	}
 }

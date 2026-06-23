@@ -10,7 +10,6 @@ import (
 	"github.com/Sameetpatro/NimbusFS/distributed-storage/internal/storage"
 	storagev1 "github.com/Sameetpatro/NimbusFS/distributed-storage/proto/gen/storagev1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const streamFrameSize = 32 * 1024
@@ -20,13 +19,14 @@ const storageGRPCTimeout = 30 * time.Second
 // embedding UnimplementedStorageServiceServer satisfies the interface for forward compatibility
 type StorageGRPCServer struct {
 	storagev1.UnimplementedStorageServiceServer
-	store  *storage.DiskStore
-	nodeID string
+	store      *storage.DiskStore
+	nodeID     string
+	tlsEnabled bool
 }
 
 // NewStorageGRPCServer wires disk store into the storage grpc service.
-func NewStorageGRPCServer(store *storage.DiskStore, nodeID string) *StorageGRPCServer {
-	return &StorageGRPCServer{store: store, nodeID: nodeID}
+func NewStorageGRPCServer(store *storage.DiskStore, nodeID string, tlsEnabled bool) *StorageGRPCServer {
+	return &StorageGRPCServer{store: store, nodeID: nodeID, tlsEnabled: tlsEnabled}
 }
 
 // StoreChunk receives a streaming upload and writes to disk.
@@ -134,7 +134,7 @@ func (s *StorageGRPCServer) ReplicateChunk(ctx context.Context, req *storagev1.R
 	callCtx, cancel := context.WithTimeout(ctx, storageGRPCTimeout)
 	defer cancel()
 
-	conn, err := grpc.NewClient(req.SourceAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(req.SourceAddress, DialOptions(s.tlsEnabled)...)
 	if err != nil {
 		return nil, fmt.Errorf("grpcserver.ReplicateChunk: dial source: %w", err)
 	}

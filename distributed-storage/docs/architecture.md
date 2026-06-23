@@ -1,85 +1,91 @@
-# NimbusFS Architecture (Phase 1)
+# Architecture
 
-Distributed file storage inspired by GFS, HDFS, and MinIO. Phase 1 delivers the scaffold; RPC handlers and upload/download paths land in later phases.
-
-## High-Level Diagram
+## System Overview
 
 ```
                          +------------------+
-                         |   CLI Client     |
-                         |  (cmd/client)    |
+                         |     Client       |
+                         |  (dfs CLI / curl)|
                          +--------+---------+
-                                  | HTTP (Phase 2+)
+                                  | HTTP :8080
                                   v
-+------------------+    REST     +------------------+
-|  Storage Node 1  |<---gRPC---->|                  |
-+------------------+            |      Master      |
-+------------------+            |   (cmd/master)   |
-|  Storage Node 2  |<---gRPC--->|                  |
-+------------------+            |  - REST API      |
-+------------------+            |  - gRPC (nodes)  |
-|  Storage Node N  |<---gRPC--->|  - BoltDB meta   |
-+------------------+            +--------+---------+
-                                         |
-                    heartbeats /         | metadata
-                    chunk reports        v
-                                  +--------------+
-                                  |  BoltDB      |
-                                  |  (files,     |
-                                  |   nodes)     |
-                                  +--------------+
-
-        Storage <-------- replicate --------> Storage
-              (node-to-node StorageService gRPC, Phase 2+)
-
-        +-------------+       scrape        +-------------+
-        | Prometheus  |<---------------------| all nodes   |
-        +------+------+                       +-------------+
-               |
-               v
-        +-------------+
-        |  Grafana    |
-        +-------------+
++------------------+    gRPC :9090    +---------------------------+
+|   Prometheus     |<--- scrape -------|         Master            |
+|     :9090        |                   |  REST API + BoltDB meta   |
++--------+---------+                   |  Node registry + placement|
+         |                             +----+------+------+--------+
+         | metrics                            |      |      |
+         v                                    | gRPC | gRPC | gRPC
++------------------+                          v      v      v
+|    Grafana       |                    +-----+ +-----+ +-----+ ... (x5)
+|     :3000        |                    | S-1 | | S-2 | | S-3 |
++------------------+                    +-----+ +-----+ +-----+
+                                              \    |    /
+                                               chunk replicas (RF=3)
 ```
 
-## Components
+Eight Docker services: **master**, **storage-1..5**, **prometheus**, **grafana**.
 
-| Component | Package / Path | Responsibility |
-|-----------|----------------|----------------|
-| Master | `cmd/master` | File metadata, node registry, REST API, placement decisions |
-| Storage node | `cmd/storage` | Local chunk store, gRPC data plane, heartbeats |
-| Client | `cmd/client` | Upload, download, list (Phase 2+) |
-| Domain | `internal/domain` | Pure types: `FileMetadata`, `Chunk`, `StorageNode` |
-| Config | `internal/config` | YAML + env overlay |
-| Metadata | `internal/metadata` | `Store` interface + BoltDB implementation |
-| Chunking | `internal/chunking` | Split files into fixed-size chunks with SHA-256 IDs |
-| Replication | `internal/replication` | Replica selection and re-replication (stub in Phase 1) |
-| Heartbeat | `internal/heartbeat` | Liveness sender (storage) and monitor (master) |
-| Local storage | `internal/storage` | Disk-backed chunk read/write |
-| REST API | `internal/api` | Gin handlers |
-| gRPC | `internal/grpcserver` + `proto/` | Service definitions and server wrappers |
+## Upload Data Flow
 
-## Data Flow (Target — Phase 2+)
+1. Client sends `POST /api/v1/upload` (multipart file) with API key or JWT.
+2. Master assigns a `file_id` and streams the body through the chunker (default 4 MiB chunks).
+3. For each chunk, the replication manager selects `replication_factor` alive nodes sorted by free space.
+4. Master opens gRPC client streams to each selected storage node and sends chunk bytes in parallel (`errgroup`).
+5. Storage nodes persist chunks atomically (write temp file, rename) and return success.
+6. Master records `FileMetadata` (chunk IDs, node placements, checksums) in BoltDB.
+7. Client receives `201` with `file_id`, size, and chunk count.
 
-1. **Upload**: Client → Master REST → chunker splits file → master selects N nodes per chunk → parallel `StoreChunk` streams to storage nodes → nodes `ReportChunkStored` → master persists `FileMetadata`.
-2. **Download**: Client → Master REST → master returns chunk map → client fetches chunks from any live replica via `RetrieveChunk` → reassembles file in order by `Index`.
-3. **Failure**: Heartbeat monitor marks node `dead` → replication manager re-copies affected chunks to healthy nodes → master updates `ChunkInfo.NodeIDs`.
+## Download Data Flow
 
-## Configuration
+1. Client sends `GET /api/v1/files/{fileId}/download` with auth.
+2. Master loads `FileMetadata` from BoltDB; returns `404` if missing.
+3. For each chunk in order, master calls `RetrieveChunk` on replica nodes with fallback.
+4. Checksum is verified per chunk; corrupt replica triggers next node in `NodeIDs`.
+5. Chunk bytes are streamed to the HTTP response (memory-bounded via `io.Copy`).
+6. Client receives the reassembled file as `application/octet-stream`.
 
-- Default: `configs/config.yaml`
-- Env overrides: `NODE_ID`, `MASTER_*`, `STORAGE_*`, `LOG_LEVEL`, `METRICS_PORT`, etc.
-- Docker: `deployments/docker-compose.yml` — 1 master, 5 storage nodes, Prometheus, Grafana, optional client profile.
+## Node Failure Recovery
 
-## Network (Docker Compose)
+1. Storage nodes send periodic gRPC heartbeats to master (default every 5s).
+2. Heartbeat monitor scans registry; nodes silent longer than `dead_threshold` (15s) are marked **dead**.
+3. Dead node ID is sent on `deadCh`; replicator runs `ReReplicateFromDeadNode` once per death event.
+4. Replicator scans all file metadata for chunks referencing the dead node.
+5. For each affected chunk, a healthy replica is read and copied to a new node via `ReplicateChunk` gRPC.
+6. Metadata `NodeIDs` list is updated in BoltDB.
+7. Downloads continue from surviving replicas during re-replication.
 
-All services on bridge network `dfs-net`. Master exposes `8080` (REST) and `9090` (gRPC). Storage nodes expose host ports `9091–9095` (gRPC) with per-node metrics on `9101–9105`.
+## Consistency Model
 
-## Phase Roadmap
+See [consistency.md](consistency.md). Summary: **strong metadata consistency** (single BoltDB writer), **eventual chunk replication** (ack after RF successes, background heal).
 
-| Phase | Focus |
-|-------|--------|
-| **1** (current) | Scaffold, config, logging, domain, protos, Docker skeleton |
-| **2** | gRPC service implementations, upload/download, node registration |
-| **3** | Auth (JWT/API key), TLS, prometheus metrics, re-replication |
-| **4** | Integration tests, chaos/failure testing, production hardening |
+## Technology Choices
+
+| Choice | Reason |
+|--------|--------|
+| **BoltDB (bbolt)** | Embedded, zero external DB for v1; serialized writes give strong metadata consistency; crash-safe. SQLite considered but bbolt fits key-value metadata access patterns. |
+| **Gin** | Mature HTTP router with middleware ecosystem; faster to ship auth, rate limits, and multipart uploads than raw `net/http` alone. |
+| **gRPC + protobuf** | Streaming chunk transfer between nodes; typed contracts in `proto/`; `WithTransportCredentials` for TLS. |
+| **Prometheus + Grafana** | Standard metrics stack; custom `dfs_*` counters/histograms for uploads, node health, replication lag. |
+| **ECDSA P-256 TLS** | Self-signed dev certs via `internal/tlsconfig`; shorter keys and faster handshakes than RSA at same security level. |
+| **errgroup** | Parallel replica writes with first-error cancellation. |
+| **sync.RWMutex** | Read-heavy node registry; heartbeats take write lock briefly. |
+
+## Package Layout
+
+```
+cmd/master/          REST + gRPC master process
+cmd/storage/         Storage node process
+cmd/client/          dfs CLI (cobra)
+internal/api/        REST handlers and upload/download pipeline
+internal/metadata/   BoltDB MetadataStore
+internal/replication/ Placement, fetch fallback, re-replication
+internal/heartbeat/  Monitor + sender
+internal/grpcserver/ Master/storage gRPC + client pool
+internal/chunking/   Split, stream, checksum
+internal/tlsconfig/  Load-or-generate TLS for dev/docker
+```
+
+## Graceful Shutdown
+
+All long-running binaries trap `SIGINT`/`SIGTERM`, cancel background work, then shut down HTTP → gRPC → databases within a 30s timeout. Abrupt kills can drop in-flight requests; BoltDB is crash-safe but orderly close is preferred.
